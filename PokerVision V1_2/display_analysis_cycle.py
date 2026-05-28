@@ -2244,29 +2244,37 @@ def _compact_service_runtime_report(report: Dict[str, object]) -> Dict[str, obje
 
 def _should_service_stop_poker_branch(service_report: Dict[str, object]) -> bool:
     """
-    V7.0 ordered pipeline policy.
+    V7.0/V0.9.1 ordered pipeline policy.
 
-    True means Trigger_UI service branch has handled this frame and the heavy
-    poker branch must not run for the same table/frame.
+    True means Trigger_UI service branch has successfully handled this frame and
+    the heavy poker branch must not run for the same table/frame.
 
     Stop statuses:
-    - dry_run: service action was selected in safe mode
-    - clicked: service action performed a real click
-    - confirmed: detect-only confirmation such as True_active_fold
-    - explicit frame_finished / skip_action_button_runtime flags
+    - dry_run: service action was selected in safe mode;
+    - clicked: service action performed a real click;
+    - confirmed: detect-only terminal confirmation such as True_active_fold;
+    - explicit frame_finished / skip_action_button_runtime flags only when the
+      service status is not a non-terminal failure/passive status.
 
     Non-stop statuses:
-    - skipped: no actionable service branch
-    - detected_only: passive service marker, e.g. Remove_Table only
-    - blocked/error: no successful service action; keep normal diagnostics flow
+    - skipped: no actionable service branch;
+    - detected_only: passive service marker, e.g. Remove_Table only;
+    - blocked/error: no successful service action; keep normal diagnostics flow.
     """
     service = service_report.get("service_click", {}) if isinstance(service_report, dict) else {}
     if not isinstance(service, dict):
         return False
 
     status = str(service.get("status") or "").strip().lower()
+
     if status in {"dry_run", "clicked", "confirmed"}:
         return True
+
+    # V0.9.1: status is authoritative for failures/passive markers. A stale or
+    # pre-set skip_action_button_runtime/frame_finished flag must not stop the
+    # poker/action branch when the service action itself ended as blocked/error.
+    if status in {"", "skipped", "detected_only", "blocked", "error"}:
+        return False
 
     if bool(service.get("frame_finished")):
         return True
