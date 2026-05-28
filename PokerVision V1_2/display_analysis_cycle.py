@@ -2978,16 +2978,54 @@ def run_ui_display_analysis_cycle(
             and bool(action_event_decision.should_process)
             and bool(action_event_decision.action_event_id)
         )
+
+        action_runtime_skip_reason: Optional[str] = None
+        action_runtime_skip_detail: Dict[str, object] = {
+            "active_confirmed": bool(active_confirmed),
+            "action_event_decision_present": action_event_decision is not None,
+            "action_event_should_process": (
+                bool(action_event_decision.should_process)
+                if action_event_decision is not None
+                else False
+            ),
+            "action_event_reason": (
+                str(action_event_decision.reason)
+                if action_event_decision is not None
+                else None
+            ),
+            "action_event_id_present": (
+                bool(action_event_decision.action_event_id)
+                if action_event_decision is not None
+                else False
+            ),
+        }
+        if not active_confirmed:
+            action_runtime_skip_reason = "no_active_confirmed"
+        elif action_event_decision is None:
+            action_runtime_skip_reason = "missing_action_event_decision"
+        elif not bool(action_event_decision.should_process):
+            action_runtime_skip_reason = str(action_event_decision.reason or "action_event_not_processable")
+        elif not bool(action_event_decision.action_event_id):
+            action_runtime_skip_reason = "missing_action_event_id"
+
         action_runtime_allowed = (
             action_runtime_candidate
             and not service_frame_finished
             and not service_skip_action_runtime
         )
+        if action_runtime_candidate:
+            if service_frame_finished:
+                action_runtime_skip_reason = "blocked_by_service_frame_finished"
+            elif service_skip_action_runtime:
+                action_runtime_skip_reason = "blocked_by_service_skip_action_runtime"
+
         _update_runtime_lifecycle_diagnostics(
             state,
             action_runtime_pre_gate={
                 "candidate": bool(action_runtime_candidate),
                 "allowed_before_transaction_gate": bool(action_runtime_allowed),
+                "skip_reason_before_transaction_gate": action_runtime_skip_reason,
+                "skip_detail": action_runtime_skip_detail,
                 "blocked_by_service_frame_finished": bool(service_frame_finished),
                 "blocked_by_service_skip_action_runtime": bool(service_skip_action_runtime),
             },
@@ -3010,6 +3048,12 @@ def run_ui_display_analysis_cycle(
                     stage="before_action_runtime",
                 )
             if not action_transaction_decision.should_process:
+                action_runtime_skip_reason = str(
+                    action_transaction_decision.reason or "blocked_by_late_transaction_gate"
+                )
+                action_runtime_skip_detail["transaction_gate_locked_by"] = (
+                    action_transaction_decision.locked_by_transaction_id
+                )
                 print(
                     f"[TableActionTransactionGate][{slot.table_id}] action runtime suppressed, "
                     f"analysis preserved: reason={action_transaction_decision.reason}, "
@@ -3023,6 +3067,8 @@ def run_ui_display_analysis_cycle(
             action_runtime_after_gate={
                 "allowed": bool(action_runtime_allowed),
                 "candidate": bool(action_runtime_candidate),
+                "skip_reason": action_runtime_skip_reason,
+                "skip_detail": action_runtime_skip_detail,
             },
         )
 
@@ -3039,18 +3085,22 @@ def run_ui_display_analysis_cycle(
             if not action_runtime_candidate:
                 print(
                     f"[V1.1 Stage2][{slot.table_id}] skipped: "
-                    "solver payload/action runtime requires a new strong Active action_event."
+                    f"reason={action_runtime_skip_reason}; "
+                    f"active_confirmed={active_confirmed}; "
+                    f"event_reason={action_runtime_skip_detail.get('action_event_reason')}; "
+                    f"event_id_present={action_runtime_skip_detail.get('action_event_id_present')}"
                 )
             elif service_frame_finished or service_skip_action_runtime:
                 print(
                     f"[V1.1 Stage2][{slot.table_id}] skipped by service runtime: "
+                    f"reason={action_runtime_skip_reason}; "
                     f"frame_finished={service_frame_finished}, "
                     f"skip_action_runtime={service_skip_action_runtime}"
                 )
             else:
                 print(
-                    f"[V1.1 Stage2][{slot.table_id}] skipped by late transaction gate; "
-                    "table analysis was preserved."
+                    f"[V1.1 Stage2][{slot.table_id}] skipped by late transaction gate: "
+                    f"reason={action_runtime_skip_reason}; table analysis was preserved."
                 )
 
         state["runtime_action"] = _build_runtime_action_block(
