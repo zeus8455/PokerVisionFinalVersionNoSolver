@@ -255,10 +255,14 @@ def apply_preflop_blind_anchor_participation_check(
     between these anchors and already has Fold=True, it is treated as a logical
     SitOut for this hand:
     - sitout=True;
+    - logical_sitout=True;
+    - sitout_source="blind_gap_fold_correction";
+    - raw_fold_before_logical_sitout=True;
     - position=None after recomputing positions.
 
     Raw model facts are not stored separately in clean JSON, therefore this
-    function updates the compact canonical player state in-place.
+    function updates the compact canonical player state in-place while retaining
+    explicit participation-source diagnostics for Dark_JSON audit.
     """
     board_block = table_structure_block.get("classes", {}).get("Board", {})
     if board_block.get("detect"):
@@ -316,11 +320,16 @@ def apply_preflop_blind_anchor_participation_check(
             return players_block
 
     corrected_any = False
+    corrected_seats: List[str] = []
     for seat_name in blind_gap_seats:
         seat_state = seats.get(seat_name, {})
         if seat_state.get("sitout") is not True and seat_state.get("fold") is True:
             seat_state["sitout"] = True
+            seat_state["logical_sitout"] = True
+            seat_state["sitout_source"] = "blind_gap_fold_correction"
+            seat_state["raw_fold_before_logical_sitout"] = True
             corrected_any = True
+            corrected_seats.append(seat_name)
 
     if not corrected_any:
         return players_block
@@ -348,4 +357,15 @@ def apply_preflop_blind_anchor_participation_check(
             seat_state["position"] = seat_positions.get(seat_name)
 
     players_block["btn_seat"] = btn_seat
+    players_block["participation_correction"] = {
+        "schema_version": "preflop_blind_anchor_participation_correction_v0_5_2",
+        "status": "applied",
+        "source": "positions_builder.apply_preflop_blind_anchor_participation_check",
+        "rule": "blind_gap_fold_to_logical_sitout",
+        "btn_seat": btn_seat,
+        "sb_seat": sb_seat,
+        "bb_seat": bb_seat,
+        "blind_gap_seats": blind_gap_seats,
+        "corrected_seats": corrected_seats,
+    }
     return players_block

@@ -238,16 +238,29 @@ def _build_player_participation_audit_entry(
     fold_value = _as_bool(player.get("fold"), default=False)
     sitout_value = _as_bool(player.get("sitout"), default=False)
     hero_value = _as_bool(player.get("hero"), default=False) or len(cards) == 2
+    logical_sitout = _as_bool(player.get("logical_sitout"), default=False)
+    raw_fold_before_logical_sitout = _as_bool(
+        player.get("raw_fold_before_logical_sitout"),
+        default=False,
+    )
+    sitout_source = _clean_string(player.get("sitout_source"))
+    if sitout_value and not sitout_source:
+        sitout_source = "detector_or_upstream_unknown"
 
     exclusion_reason: Optional[str] = None
+    clear_json_rule = "included_participating_player"
     if sitout_value:
         exclusion_reason = "sitout_true"
+        clear_json_rule = "excluded_because_sitout_dominates_fold"
     elif not resolved_position:
         exclusion_reason = "missing_or_invalid_position"
+        clear_json_rule = "excluded_because_position_unresolved"
 
     danger_flags: List[str] = []
     if fold_value and sitout_value:
         danger_flags.append("fold_and_sitout_player_will_be_excluded")
+    if fold_value and sitout_value and logical_sitout:
+        danger_flags.append("fold_converted_to_logical_sitout_will_be_excluded")
     if hero_value and exclusion_reason:
         danger_flags.append("hero_would_be_excluded_from_clear_json")
     if len(cards) == 2 and sitout_value:
@@ -258,10 +271,14 @@ def _build_player_participation_audit_entry(
         "resolved_position": resolved_position,
         "fold": bool(fold_value),
         "sitout": bool(sitout_value),
+        "sitout_source": sitout_source,
+        "logical_sitout": bool(logical_sitout),
+        "raw_fold_before_logical_sitout": bool(raw_fold_before_logical_sitout),
         "hero": bool(hero_value),
         "cards_count": len(cards),
         "included_in_clear_json": exclusion_reason is None,
         "exclude_reason": exclusion_reason,
+        "clear_json_rule": clear_json_rule,
         "danger_flags": danger_flags,
     }
 
@@ -280,8 +297,8 @@ def build_clear_json_from_dark_state(
 
     raw_players = _extract_raw_players(dark_state)
     participation_audit: Dict[str, Any] = {
-        "schema_version": "player_participation_audit_v0_5_1",
-        "behavior": "diagnostics_only_no_clear_json_behavior_changes",
+        "schema_version": "player_participation_audit_v0_5_2",
+        "behavior": "sitout_dominates_fold_with_sitout_source_diagnostics",
         "raw_player_count": len(raw_players),
         "included_count": 0,
         "excluded_count": 0,
@@ -289,6 +306,8 @@ def build_clear_json_from_dark_state(
         "excluded_from_clear_json": [],
         "hero_exclusion_detected": False,
         "fold_and_sitout_exclusion_detected": False,
+        "logical_sitout_exclusion_detected": False,
+        "sitout_source_counts": {},
     }
 
     clear_players: Dict[str, Dict[str, Any]] = {}
@@ -302,10 +321,16 @@ def build_clear_json_from_dark_state(
 
         if _as_bool(player.get("sitout"), default=False):
             participation_audit["excluded_from_clear_json"].append(audit_entry)
+            sitout_source = str(audit_entry.get("sitout_source") or "detector_or_upstream_unknown")
+            source_counts = participation_audit.get("sitout_source_counts")
+            if isinstance(source_counts, dict):
+                source_counts[sitout_source] = int(source_counts.get(sitout_source, 0)) + 1
             if audit_entry.get("hero"):
                 participation_audit["hero_exclusion_detected"] = True
             if bool(audit_entry.get("fold")) and bool(audit_entry.get("sitout")):
                 participation_audit["fold_and_sitout_exclusion_detected"] = True
+            if bool(audit_entry.get("logical_sitout")):
+                participation_audit["logical_sitout_exclusion_detected"] = True
             continue
         if not position:
             participation_audit["excluded_from_clear_json"].append(audit_entry)
