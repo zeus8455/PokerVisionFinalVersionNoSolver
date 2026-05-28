@@ -296,6 +296,13 @@ class ActionEventGate:
         value = (total_pot or {}).get("value") if isinstance(total_pot, dict) else None
         return cls._normalize_amount(value)
 
+    @staticmethod
+    def _seat_cards_for_signature(seat: Dict[str, Any]) -> List[str]:
+        raw_cards = seat.get("cards") if isinstance(seat, dict) else None
+        if not isinstance(raw_cards, list):
+            return []
+        return sorted(str(card) for card in raw_cards if str(card).strip())
+
     @classmethod
     def _extract_player_action_facts(cls, players_block: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, object]]:
         seats = (players_block or {}).get("seats") if isinstance(players_block, dict) else None
@@ -307,15 +314,40 @@ class ActionEventGate:
             seat = seats.get(seat_name)
             if not isinstance(seat, dict):
                 continue
+
             chips = seat.get("chips") if isinstance(seat.get("chips"), dict) else {}
             stack = seat.get("stack") if isinstance(seat.get("stack"), dict) else {}
+            cards = cls._seat_cards_for_signature(seat)
+
+            chips_detect = bool(chips.get("detect", False))
+            chips_value = cls._normalize_amount(chips.get("value"))
+            fold = bool(seat.get("fold", False))
+            sitout = bool(seat.get("sitout", False))
+            all_in = bool(stack.get("all_in", False))
+            hero = bool(seat.get("hero", False))
+
+            # V1.0.2: ActionEventGate must ignore raw empty/fold-only seat noise.
+            # Some live frames briefly add extra Player_seatN rows with only a
+            # logical position and fold=True, while Final Clear_JSON later filters
+            # them out. Including those rows in the signature creates false
+            # new_active_action_event values and duplicate Final Clear_JSON files.
+            # A seat is action-significant only when it has proof of participation
+            # or a current actionable state: HERO/cards, chips contribution, sitout,
+            # or all-in. A bare fold flag without cards/chips is not enough.
+            has_chips_fact = chips_detect or chips_value is not None
+            has_cards_fact = bool(cards)
+            signature_relevant = hero or has_cards_fact or has_chips_fact or sitout or all_in
+            if not signature_relevant:
+                continue
+
             facts[str(seat_name)] = {
                 "position": seat.get("position"),
-                "fold": bool(seat.get("fold", False)),
-                "sitout": bool(seat.get("sitout", False)),
-                "chips_detect": bool(chips.get("detect", False)),
-                "chips_value": cls._normalize_amount(chips.get("value")),
-                "all_in": bool(stack.get("all_in", False)),
+                "hero": hero,
+                "fold": fold,
+                "sitout": sitout,
+                "chips_detect": chips_detect,
+                "chips_value": chips_value,
+                "all_in": all_in,
             }
         return facts
 
@@ -1004,6 +1036,10 @@ def _slot_bbox_tuple_from_state(state: Dict[str, object]) -> Optional[Tuple[floa
 
 
 def _load_runtime_plan_from_contract(runtime_plan_contract: Dict[str, object]) -> Dict[str, object]:
+    embedded_plan = runtime_plan_contract.get("runtime_plan_state")
+    if isinstance(embedded_plan, dict):
+        return dict(embedded_plan)
+
     path_text = str(runtime_plan_contract.get("path") or "").strip()
     if path_text:
         try:
@@ -1437,8 +1473,9 @@ def build_and_save_action_runtime_plan_contract(
     action_decision_state: Dict[str, object],
     cycle_dir: Path,
     table_id: str,
+    publish_files: bool = True,
 ) -> Dict[str, object]:
-    """Build/save Action_Runtime_Plan_JSON and return a Dark_JSON contract block."""
+    """Build Action_Runtime_Plan_JSON contract and optionally publish the file."""
     if not V07_ACTION_RUNTIME_PLAN_ENABLED:
         return {
             "enabled": False,
@@ -1452,18 +1489,27 @@ def build_and_save_action_runtime_plan_contract(
         runtime_plan_state = build_action_runtime_plan_from_action_decision(action_decision_state)
         validation = validate_action_runtime_plan_contract(runtime_plan_state)
         if validation.get("ok"):
-            path = save_action_runtime_plan_table_frame_json(
-                runtime_plan_state=runtime_plan_state,
-                cycle_dir=cycle_dir,
-                table_id=table_id,
-            )
+            if publish_files:
+                path = save_action_runtime_plan_table_frame_json(
+                    runtime_plan_state=runtime_plan_state,
+                    cycle_dir=cycle_dir,
+                    table_id=table_id,
+                )
+                path_text: Optional[str] = str(path)
+                publication_status = "saved"
+            else:
+                path_text = None
+                publication_status = "preview_not_saved_pending_only"
             return {
                 "enabled": True,
                 "source": "Action_Decision_JSON",
-                "path": str(path),
+                "path": path_text,
                 "dir": V07_ACTION_RUNTIME_PLAN_DIR_NAME,
                 "validation": validation,
-                "status": "saved",
+                "status": publication_status,
+                "publication_stage": "final" if publish_files else "pending_preview",
+                "file_publication_enabled": bool(publish_files),
+                "runtime_plan_state": dict(runtime_plan_state),
                 "planned_action": runtime_plan_state.get("planned_action"),
                 "target_sequence": runtime_plan_state.get("target_sequence"),
                 "target_sequences": runtime_plan_state.get("target_sequences"),
@@ -1495,8 +1541,9 @@ def build_and_save_action_decision_contract(
     decision_state: Dict[str, object],
     cycle_dir: Path,
     table_id: str,
+    publish_files: bool = True,
 ) -> Dict[str, object]:
-    """Build/save Action_Decision_JSON and return a Dark_JSON contract block."""
+    """Build Action_Decision_JSON contract and optionally publish the file."""
     if not V06_ACTION_DECISION_ENABLED:
         return {
             "enabled": False,
@@ -1510,23 +1557,33 @@ def build_and_save_action_decision_contract(
         action_decision_state = build_action_decision_from_decision_json(decision_state)
         validation = validate_action_decision_contract(action_decision_state)
         if validation.get("ok"):
-            path = save_action_decision_table_frame_json(
-                action_decision_state=action_decision_state,
-                cycle_dir=cycle_dir,
-                table_id=table_id,
-            )
+            if publish_files:
+                path = save_action_decision_table_frame_json(
+                    action_decision_state=action_decision_state,
+                    cycle_dir=cycle_dir,
+                    table_id=table_id,
+                )
+                path_text: Optional[str] = str(path)
+                publication_status = "saved"
+            else:
+                path_text = None
+                publication_status = "preview_not_saved_pending_only"
             runtime_plan_contract = build_and_save_action_runtime_plan_contract(
                 action_decision_state=action_decision_state,
                 cycle_dir=cycle_dir,
                 table_id=table_id,
+                publish_files=publish_files,
             )
             return {
                 "enabled": True,
                 "source": "Decision_JSON",
-                "path": str(path),
+                "path": path_text,
                 "dir": V06_ACTION_DECISION_DIR_NAME,
                 "validation": validation,
-                "status": "saved",
+                "status": publication_status,
+                "publication_stage": "final" if publish_files else "pending_preview",
+                "file_publication_enabled": bool(publish_files),
+                "action_decision_state": dict(action_decision_state),
                 "action": action_decision_state.get("action"),
                 "size_policy": action_decision_state.get("size_policy"),
                 "target_button_classes": action_decision_state.get("target_button_classes"),
@@ -1731,17 +1788,19 @@ def save_dark_and_clear_table_frame_json(
                         decision_state = build_decision_json_from_clear_state(clear_state_candidate)
                         decision_json_validation = validate_decision_json_contract(decision_state)
                         if decision_json_validation.get("ok"):
-                            decision_json_path = save_decision_table_frame_json(
-                                decision_state=decision_state,
-                                cycle_dir=cycle_dir,
-                                table_id=table_id,
-                            )
+                            # V1.0.1: Pending Clear_JSON is diagnostic-only. Build the
+                            # Decision/Action/RuntimePlan chain in memory so guards and
+                            # lineage audits can still validate the current action, but
+                            # do not publish Decision_JSON, Action_Decision_JSON or
+                            # Action_Runtime_Plan_JSON files until Final Clear_JSON is
+                            # actually saved after click/dry-run completion.
                             action_decision_contract = build_and_save_action_decision_contract(
                                 decision_state=decision_state,
                                 cycle_dir=cycle_dir,
                                 table_id=table_id,
+                                publish_files=False,
                             )
-                            if action_decision_contract.get("status") not in {"saved", "disabled"}:
+                            if action_decision_contract.get("status") not in {"preview_not_saved_pending_only", "disabled"}:
                                 for message in action_decision_contract.get("validation", {}).get("errors", []) if isinstance(action_decision_contract.get("validation"), dict) else []:
                                     add_error(state, block="action_decision_contract", message=str(message))
                         else:
@@ -1774,7 +1833,21 @@ def save_dark_and_clear_table_frame_json(
                     "path": str(decision_json_path) if decision_json_path else None,
                     "dir": V05_DECISION_JSON_DIR_NAME,
                     "validation": decision_json_validation,
-                    "status": "saved" if decision_json_path else ("skipped" if not V05_DECISION_JSON_ENABLED else "validation_failed"),
+                    "status": (
+                        "saved"
+                        if decision_json_path
+                        else (
+                            "skipped"
+                            if not V05_DECISION_JSON_ENABLED
+                            else (
+                                "preview_not_saved_pending_only"
+                                if isinstance(decision_json_validation, dict) and decision_json_validation.get("ok")
+                                else "validation_failed"
+                            )
+                        )
+                    ),
+                    "publication_stage": "pending_preview" if (isinstance(decision_json_validation, dict) and decision_json_validation.get("ok") and not decision_json_path) else "pending",
+                    "file_publication_enabled": bool(decision_json_path),
                 },
                 "action_decision_contract": action_decision_contract,
             }
@@ -1926,6 +1999,7 @@ def save_dark_and_clear_table_frame_json(
                                                 decision_state=final_decision_state,
                                                 cycle_dir=cycle_dir,
                                                 table_id=table_id,
+                                                publish_files=True,
                                             )
                                             if final_action_decision_contract.get("status") not in {"saved", "disabled"}:
                                                 for message in final_action_decision_contract.get("validation", {}).get("errors", []) if isinstance(final_action_decision_contract.get("validation"), dict) else []:
@@ -2022,6 +2096,7 @@ def save_dark_and_clear_table_frame_json(
                                             decision_state=final_decision_state,
                                             cycle_dir=cycle_dir,
                                             table_id=table_id,
+                                            publish_files=True,
                                         )
                                         if final_action_decision_contract.get("status") not in {"saved", "disabled"}:
                                             for message in final_action_decision_contract.get("validation", {}).get("errors", []) if isinstance(final_action_decision_contract.get("validation"), dict) else []:
