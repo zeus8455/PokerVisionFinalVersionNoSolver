@@ -475,18 +475,48 @@ class HandIdentityTracker:
         hero_cards_key = self._normalize_hero_cards(hero_cards)
         previous = self._active_hand_by_table_id.get(table_id)
 
-        # Без двух валидных HERO cards нельзя надёжно доказать continuation.
-        # V0.8: missing HERO on a single Active frame must not erase the last
-        # known hand; the frame itself remains invalid for Clear_JSON, but a
-        # future frame may still prove continuation by HERO + board.
+        # Без двух валидных HERO cards нельзя надёжно доказать новую руку.
+        # V0.4.2: if a table already has a tracked Active hand, a single frame
+        # with missing/invalid HERO cards must keep that previous hand_id as an
+        # unproven continuation candidate. This does NOT invent HERO cards;
+        # hero_cards_key stays None and Clear_JSON remains dependent on normal
+        # validation/recovery. The goal is only to avoid allocating a false new
+        # hand_id before Clear_JSON recovery has a chance to compare with the
+        # previous stable state for the same table/hand.
         if hero_cards_key is None:
+            if previous is not None and V08_KEEP_LAST_HAND_ON_INVALID_HERO:
+                occurrence = None
+                if normalized_street is not None:
+                    occurrence = previous.street_counts.get(normalized_street, 0) + 1
+                    previous.street_counts[normalized_street] = occurrence
+                self._update_tracked_context(
+                    previous,
+                    board_cards=normalized_board_cards,
+                    street=normalized_street,
+                )
+                warning = (
+                    f"{table_id}: strong Active detected, but HERO cards are not exactly two unique cards; "
+                    "keeping previous hand_id as an unproven continuation candidate so Clear_JSON recovery "
+                    "can compare against the previous stable state. HERO cards were not invented."
+                )
+                return FrameIdentity(
+                    hand_id=previous.hand_id,
+                    frame_name=self._build_frame_name(previous.hand_id, normalized_street, occurrence),
+                    is_continuation=True,
+                    active_confirmed=True,
+                    hero_cards_key=None,
+                    street=normalized_street,
+                    street_occurrence=occurrence,
+                    warning=warning,
+                )
+
             hand_id = self._allocate_hand_id()
             if not V08_KEEP_LAST_HAND_ON_INVALID_HERO:
                 self._active_hand_by_table_id.pop(table_id, None)
             occurrence = 1 if normalized_street is not None else None
             warning = (
                 f"{table_id}: strong Active detected, but HERO cards are not exactly two unique cards; "
-                "continuation identity cannot be proven for this frame."
+                "no previous tracked hand is available, so continuation identity cannot be proven for this frame."
             )
             return FrameIdentity(
                 hand_id=hand_id,
@@ -2944,8 +2974,8 @@ def run_ui_display_analysis_cycle(
 
         raw_hero_cards_for_identity = normalize_card_list(hero_cards_for_identity)
         state["hand_identity_recovery_order_audit"] = {
-            "schema_version": "hand_identity_recovery_order_audit_v0_4_1",
-            "behavior": "diagnostics_only_no_identity_or_recovery_changes",
+            "schema_version": "hand_identity_recovery_order_audit_v0_4_2",
+            "behavior": "identity_keeps_previous_hand_id_on_missing_hero_without_inventing_cards",
             "active_confirmed": bool(active_confirmed),
             "raw_hero_cards_for_identity": raw_hero_cards_for_identity,
             "raw_hero_cards_valid_for_identity": (
