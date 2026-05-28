@@ -763,6 +763,75 @@ def save_completed_json_table_frame_json(
     return path
 
 
+def _compact_gate_decision_for_diagnostics(decision: Optional[object]) -> Dict[str, object]:
+    """Return a stable compact view of an event/transaction gate decision."""
+    if decision is None:
+        return {"status": "not_evaluated"}
+    if hasattr(decision, "to_json"):
+        try:
+            payload = decision.to_json()
+            return payload if isinstance(payload, dict) else {"status": "unavailable"}
+        except Exception as exc:
+            return {"status": "error", "reason": str(exc)}
+    if isinstance(decision, dict):
+        return dict(decision)
+    return {"status": "unavailable", "type": type(decision).__name__}
+
+
+def _compact_report_for_diagnostics(report: Optional[Dict[str, object]]) -> Dict[str, object]:
+    """Return compact status fields from a runtime/service report without changing behavior."""
+    if not isinstance(report, dict):
+        return {"status": "not_available"}
+    compact: Dict[str, object] = {}
+    for key in (
+        "status",
+        "reason",
+        "phase",
+        "click_completed",
+        "click_dry_run",
+        "action",
+        "button",
+        "message",
+    ):
+        if key in report:
+            compact[key] = report.get(key)
+    service_click = report.get("service_click")
+    if isinstance(service_click, dict):
+        compact["service_click"] = {
+            "status": service_click.get("status"),
+            "reason": service_click.get("reason"),
+            "frame_finished": bool(service_click.get("frame_finished")),
+            "skip_action_button_runtime": bool(service_click.get("skip_action_button_runtime")),
+            "click_completed": bool(service_click.get("click_completed")),
+        }
+    click_result = report.get("click_result")
+    if isinstance(click_result, dict):
+        compact["click_result"] = {
+            "status": click_result.get("status"),
+            "decision_id": click_result.get("decision_id"),
+            "click_completed": bool(click_result.get("click_completed")),
+            "dry_run": bool(click_result.get("dry_run")),
+        }
+    return compact or {"status": "available"}
+
+
+def _update_runtime_lifecycle_diagnostics(state: Dict[str, object], **updates: object) -> Dict[str, object]:
+    """Attach V0.2 runtime lifecycle diagnostics to Dark_JSON state only."""
+    diagnostics = state.get("runtime_lifecycle_diagnostics")
+    if not isinstance(diagnostics, dict):
+        diagnostics = {
+            "schema_version": "runtime_lifecycle_diagnostics_v0_2",
+            "behavior": "diagnostics_only_no_runtime_decision_changes",
+            "purpose": (
+                "Explain why this frame was allowed, suppressed, finalized, or kept as Dark_JSON only."
+            ),
+        }
+        state["runtime_lifecycle_diagnostics"] = diagnostics
+    for key, value in updates.items():
+        diagnostics[key] = value
+    return diagnostics
+
+
 def _extract_clear_hero_position_and_cards(clear_state: Optional[Dict[str, Any]]) -> Tuple[Optional[str], Tuple[str, ...]]:
     """Return HERO logical position and normalized cards from a minimal Clear_JSON state."""
     if not isinstance(clear_state, dict):
@@ -2481,6 +2550,23 @@ def run_ui_display_analysis_cycle(
                 service_report=early_service_report if isinstance(early_service_report, dict) else {},
                 action_report=None,
             )
+            _update_runtime_lifecycle_diagnostics(
+                early_service_state,
+                table_id=slot.table_id,
+                cycle_id=cycle_id,
+                frame_name=early_service_frame_name,
+                active_confirmed=False,
+                table_status="service",
+                branch="early_service",
+                service_runtime={
+                    "report": _compact_report_for_diagnostics(
+                        early_service_report if isinstance(early_service_report, dict) else None
+                    ),
+                    "stop_poker_branch": _should_service_stop_poker_branch(
+                        early_service_report if isinstance(early_service_report, dict) else {}
+                    ),
+                },
+            )
 
             if _should_service_stop_poker_branch(early_service_report if isinstance(early_service_report, dict) else {}):
                 early_service_state["clear_json_contract"] = {
@@ -2803,6 +2889,24 @@ def run_ui_display_analysis_cycle(
         )
 
         state["live_capture_mode"] = _build_live_capture_mode_block()
+        _update_runtime_lifecycle_diagnostics(
+            state,
+            table_id=slot.table_id,
+            cycle_id=cycle_id,
+            frame_name=identity.frame_name,
+            active_confirmed=bool(active_confirmed),
+            table_status=table_status,
+            hand_identity={
+                "hand_id": identity.hand_id,
+                "is_continuation": bool(identity.is_continuation),
+                "hero_cards_key": list(identity.hero_cards_key) if identity.hero_cards_key else None,
+                "street": identity.street,
+                "street_occurrence": identity.street_occurrence,
+                "warning": identity.warning,
+            },
+            action_event_gate=_compact_gate_decision_for_diagnostics(action_event_decision),
+            early_transaction_gate=_compact_gate_decision_for_diagnostics(early_action_transaction_decision),
+        )
 
         if early_lifecycle_gate_audit is not None:
             state["table_lifecycle_gate"] = early_lifecycle_gate_audit
@@ -2858,6 +2962,14 @@ def run_ui_display_analysis_cycle(
         service_click = service_report.get("service_click", {}) if isinstance(service_report, dict) else {}
         service_frame_finished = bool(service_click.get("frame_finished"))
         service_skip_action_runtime = bool(service_click.get("skip_action_button_runtime"))
+        _update_runtime_lifecycle_diagnostics(
+            state,
+            service_runtime={
+                "report": _compact_report_for_diagnostics(service_report if isinstance(service_report, dict) else None),
+                "frame_finished": service_frame_finished,
+                "skip_action_button_runtime": service_skip_action_runtime,
+            },
+        )
 
         action_report: Optional[Dict[str, object]] = None
         action_runtime_candidate = (
@@ -2870,6 +2982,15 @@ def run_ui_display_analysis_cycle(
             action_runtime_candidate
             and not service_frame_finished
             and not service_skip_action_runtime
+        )
+        _update_runtime_lifecycle_diagnostics(
+            state,
+            action_runtime_pre_gate={
+                "candidate": bool(action_runtime_candidate),
+                "allowed_before_transaction_gate": bool(action_runtime_allowed),
+                "blocked_by_service_frame_finished": bool(service_frame_finished),
+                "blocked_by_service_skip_action_runtime": bool(service_skip_action_runtime),
+            },
         )
 
         # V2.0: the table transaction lifecycle starts before heavy analysis and
@@ -2895,6 +3016,15 @@ def run_ui_display_analysis_cycle(
                     f"locked_by={action_transaction_decision.locked_by_transaction_id}"
                 )
                 action_runtime_allowed = False
+
+        _update_runtime_lifecycle_diagnostics(
+            state,
+            action_transaction_gate=_compact_gate_decision_for_diagnostics(action_transaction_decision),
+            action_runtime_after_gate={
+                "allowed": bool(action_runtime_allowed),
+                "candidate": bool(action_runtime_candidate),
+            },
+        )
 
         if action_runtime_allowed:
             action_report = _run_v11_stage2_runtime_safely(
@@ -2926,6 +3056,11 @@ def run_ui_display_analysis_cycle(
         state["runtime_action"] = _build_runtime_action_block(
             service_report=service_report if isinstance(service_report, dict) else {},
             action_report=action_report,
+        )
+        _update_runtime_lifecycle_diagnostics(
+            state,
+            action_runtime_report=_compact_report_for_diagnostics(action_report),
+            runtime_action_block_present=isinstance(state.get("runtime_action"), dict),
         )
 
         clear_json_save_allowed = True
@@ -2959,6 +3094,19 @@ def run_ui_display_analysis_cycle(
                     "early_lifecycle_release": release_report,
                 }
 
+        _update_runtime_lifecycle_diagnostics(
+            state,
+            action_transaction_runtime=_compact_report_for_diagnostics(
+                transaction_runtime_report
+                if isinstance(transaction_runtime_report, dict)
+                else state.get("action_transaction_runtime") if isinstance(state.get("action_transaction_runtime"), dict) else None
+            ),
+            clear_json_pre_publication={
+                "save_allowed": bool(clear_json_save_allowed),
+                "click_result_available": isinstance(click_result_for_clear, dict),
+            },
+        )
+
         duplicate_active_hard_stop_before_pending = (
             active_confirmed
             and action_event_decision is not None
@@ -2978,6 +3126,21 @@ def run_ui_display_analysis_cycle(
                     "Action_Runtime_Plan_JSON are intentionally suppressed."
                 ),
             }
+
+        _update_runtime_lifecycle_diagnostics(
+            state,
+            duplicate_active_hard_stop={
+                "enabled": bool(duplicate_active_hard_stop_before_pending),
+                "reason": "duplicate_active_frame_blocked" if duplicate_active_hard_stop_before_pending else None,
+            },
+            clear_json_publication_intent={
+                "active_confirmed": bool(active_confirmed),
+                "build_allowed": not bool(duplicate_active_hard_stop_before_pending),
+                "save_allowed": bool(clear_json_save_allowed),
+                "requires_click_result": bool(V04_FINAL_CLEAR_JSON_REQUIRES_CLICK_RESULT),
+                "click_result_available": isinstance(click_result_for_clear, dict),
+            },
+        )
 
         dark_json_path, clear_json_path = save_dark_and_clear_table_frame_json(
             state=state,
