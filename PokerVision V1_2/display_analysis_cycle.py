@@ -3063,6 +3063,13 @@ def run_ui_display_analysis_cycle(
             runtime_action_block_present=isinstance(state.get("runtime_action"), dict),
         )
 
+        duplicate_active_hard_stop_before_pending = (
+            active_confirmed
+            and action_event_decision is not None
+            and not bool(action_event_decision.should_process)
+            and str(action_event_decision.reason) == "duplicate_active_frame_blocked"
+        )
+
         clear_json_save_allowed = True
         click_result_for_clear = None
         transaction_runtime_report: Optional[Dict[str, object]] = None
@@ -3080,17 +3087,36 @@ def run_ui_display_analysis_cycle(
             else:
                 clear_json_save_allowed = False
                 release_report = None
+                transaction_skip_reason = (
+                    "duplicate_active_frame_blocked"
+                    if duplicate_active_hard_stop_before_pending
+                    else "no_new_action_runtime_cycle_for_this_active_frame"
+                )
+                transaction_release_reason = (
+                    "duplicate_active_frame_released_without_publication"
+                    if duplicate_active_hard_stop_before_pending
+                    else "no_completed_action_runtime_for_active_lifecycle"
+                )
+                transaction_release_message = (
+                    "Duplicate Active frame released without creating new JSON/action files."
+                    if duplicate_active_hard_stop_before_pending
+                    else "Early table lifecycle was released because no action runtime completed for this Active frame."
+                )
                 if action_transaction_decision is not None and action_transaction_decision.should_process:
                     release_report = table_action_transaction_gate.abort_analysis_cycle(
                         table_id=slot.table_id,
-                        reason="no_completed_action_runtime_for_active_lifecycle",
-                        message="Early table lifecycle was released because no action runtime completed for this Active frame.",
+                        reason=transaction_release_reason,
+                        message=transaction_release_message,
                     )
                 state["action_transaction_runtime"] = {
-                    "status": "skipped",
-                    "reason": "no_new_action_runtime_cycle_for_this_active_frame",
+                    "status": "duplicate_suppressed" if duplicate_active_hard_stop_before_pending else "skipped",
+                    "reason": transaction_skip_reason,
                     "click_completed": False,
-                    "message": "Table analysis/Dark_JSON is preserved, but Final Clear_JSON requires a completed action runtime cycle.",
+                    "message": (
+                        "Duplicate Active frame suppressed by strict lifecycle policy; no new JSON/action files were created."
+                        if duplicate_active_hard_stop_before_pending
+                        else "Table analysis/Dark_JSON is preserved, but Final Clear_JSON requires a completed action runtime cycle."
+                    ),
                     "early_lifecycle_release": release_report,
                 }
 
@@ -3107,23 +3133,17 @@ def run_ui_display_analysis_cycle(
             },
         )
 
-        duplicate_active_hard_stop_before_pending = (
-            active_confirmed
-            and action_event_decision is not None
-            and not bool(action_event_decision.should_process)
-            and str(action_event_decision.reason) == "duplicate_active_frame_blocked"
-        )
         if duplicate_active_hard_stop_before_pending:
             state["duplicate_active_hard_stop"] = {
-                "schema_version": "duplicate_active_hard_stop_v4_0",
-                "status": "DUPLICATE_ACTIVE_HARD_STOP_BEFORE_PENDING_DECISION",
+                "schema_version": "duplicate_active_hard_stop_v4_1",
+                "status": "DUPLICATE_ACTIVE_SUPPRESSED_WITHOUT_PUBLICATION",
                 "reason": "duplicate_active_frame_blocked",
                 "duplicate_of": action_event_decision.duplicate_of,
                 "action_signature": action_event_decision.action_signature,
                 "message": (
-                    "Duplicate Active frame preserved as Dark_JSON only. "
-                    "Clear_JSON_Pending, Decision_JSON, Action_Decision_JSON and "
-                    "Action_Runtime_Plan_JSON are intentionally suppressed."
+                    "Duplicate Active frame was suppressed by the strict lifecycle policy. "
+                    "No new Dark_JSON, Clear_JSON_Pending, Decision_JSON, Action_Decision_JSON, "
+                    "Action_Runtime_Plan_JSON, Final Clear_JSON or JSON_Complete file was created."
                 ),
             }
 
@@ -3142,6 +3162,13 @@ def run_ui_display_analysis_cycle(
             },
         )
 
+        if duplicate_active_hard_stop_before_pending:
+            print(
+                f"[ActionEventGate][{slot.table_id}] duplicate Active output suppressed: "
+                "no Dark_JSON/Clear_JSON/Decision/RuntimePlan files created for this duplicate frame."
+            )
+            continue
+
         dark_json_path, clear_json_path = save_dark_and_clear_table_frame_json(
             state=state,
             cycle_dir=cycle_dir,
@@ -3151,12 +3178,8 @@ def run_ui_display_analysis_cycle(
             active_confirmed=active_confirmed,
             clear_json_state_machine=clear_json_state_machine,
             clear_json_save_allowed=clear_json_save_allowed,
-            clear_json_build_allowed=not duplicate_active_hard_stop_before_pending,
-            clear_json_build_block_reason=(
-                "duplicate_active_frame_blocked"
-                if duplicate_active_hard_stop_before_pending
-                else None
-            ),
+            clear_json_build_allowed=True,
+            clear_json_build_block_reason=None,
             click_result=click_result_for_clear,
         )
 
