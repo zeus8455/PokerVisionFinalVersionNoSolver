@@ -227,6 +227,45 @@ def _build_clear_player(player: Dict[str, Any], previous_player: Optional[Dict[s
     return clear_player
 
 
+def _build_player_participation_audit_entry(
+    *,
+    source_key: str,
+    player: Dict[str, Any],
+    resolved_position: Optional[str],
+) -> Dict[str, Any]:
+    """Diagnostic-only audit for why a raw player is included/excluded from Clear_JSON."""
+    cards = _candidate_cards(player)
+    fold_value = _as_bool(player.get("fold"), default=False)
+    sitout_value = _as_bool(player.get("sitout"), default=False)
+    hero_value = _as_bool(player.get("hero"), default=False) or len(cards) == 2
+
+    exclusion_reason: Optional[str] = None
+    if sitout_value:
+        exclusion_reason = "sitout_true"
+    elif not resolved_position:
+        exclusion_reason = "missing_or_invalid_position"
+
+    danger_flags: List[str] = []
+    if fold_value and sitout_value:
+        danger_flags.append("fold_and_sitout_player_will_be_excluded")
+    if hero_value and exclusion_reason:
+        danger_flags.append("hero_would_be_excluded_from_clear_json")
+    if len(cards) == 2 and sitout_value:
+        danger_flags.append("cards_infer_hero_but_sitout_excludes_player")
+
+    return {
+        "source_key": str(source_key),
+        "resolved_position": resolved_position,
+        "fold": bool(fold_value),
+        "sitout": bool(sitout_value),
+        "hero": bool(hero_value),
+        "cards_count": len(cards),
+        "included_in_clear_json": exclusion_reason is None,
+        "exclude_reason": exclusion_reason,
+        "danger_flags": danger_flags,
+    }
+
+
 def build_clear_json_from_dark_state(
     dark_state: Dict[str, Any],
     previous_clear_state: Optional[Dict[str, Any]] = None,
@@ -239,15 +278,48 @@ def build_clear_json_from_dark_state(
     if not isinstance(previous_players, dict):
         previous_players = {}
 
+    raw_players = _extract_raw_players(dark_state)
+    participation_audit: Dict[str, Any] = {
+        "schema_version": "player_participation_audit_v0_5_1",
+        "behavior": "diagnostics_only_no_clear_json_behavior_changes",
+        "raw_player_count": len(raw_players),
+        "included_count": 0,
+        "excluded_count": 0,
+        "included_in_clear_json": [],
+        "excluded_from_clear_json": [],
+        "hero_exclusion_detected": False,
+        "fold_and_sitout_exclusion_detected": False,
+    }
+
     clear_players: Dict[str, Dict[str, Any]] = {}
-    for source_key, player in _extract_raw_players(dark_state):
-        if _as_bool(player.get("sitout"), default=False):
-            continue
+    for source_key, player in raw_players:
         position = _resolve_position(source_key, player)
-        if not position:
+        audit_entry = _build_player_participation_audit_entry(
+            source_key=source_key,
+            player=player,
+            resolved_position=position,
+        )
+
+        if _as_bool(player.get("sitout"), default=False):
+            participation_audit["excluded_from_clear_json"].append(audit_entry)
+            if audit_entry.get("hero"):
+                participation_audit["hero_exclusion_detected"] = True
+            if bool(audit_entry.get("fold")) and bool(audit_entry.get("sitout")):
+                participation_audit["fold_and_sitout_exclusion_detected"] = True
             continue
+        if not position:
+            participation_audit["excluded_from_clear_json"].append(audit_entry)
+            if audit_entry.get("hero"):
+                participation_audit["hero_exclusion_detected"] = True
+            continue
+
+        participation_audit["included_in_clear_json"].append(audit_entry)
         previous_player = previous_players.get(position) if isinstance(previous_players.get(position), dict) else None
         clear_players[position] = _build_clear_player(player, previous_player)
+
+    participation_audit["included_count"] = len(participation_audit["included_in_clear_json"])
+    participation_audit["excluded_count"] = len(participation_audit["excluded_from_clear_json"])
+    dark_state["player_participation_audit"] = participation_audit
 
     return {
         "frame_id": _extract_frame_id(dark_state),
