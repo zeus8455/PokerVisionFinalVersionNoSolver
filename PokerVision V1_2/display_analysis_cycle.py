@@ -2078,21 +2078,26 @@ def save_dark_and_clear_table_frame_json(
             }
             add_error(state, block="clear_json_contract", message=str(exc))
 
-    # V0.7: expose the Action_Runtime_Plan contract inside runtime_action for Dark_JSON audit.
+    # V0.7/V0.7.1: expose the Action_Runtime_Plan contract and runtime/click lineage
+    # inside runtime_action for Dark_JSON audit. Diagnostic-only: no click, solver,
+    # gate, or Final Clear_JSON behavior is changed here.
     try:
         contract = state.get("clear_json_contract") if isinstance(state.get("clear_json_contract"), dict) else {}
         action_decision_contract = contract.get("action_decision_contract") if isinstance(contract.get("action_decision_contract"), dict) else {}
         runtime_plan_contract = action_decision_contract.get("action_runtime_plan_contract") if isinstance(action_decision_contract.get("action_runtime_plan_contract"), dict) else {}
-        if runtime_plan_contract:
-            runtime_action_block = state.get("runtime_action")
-            if isinstance(runtime_action_block, dict):
+        runtime_action_block = state.get("runtime_action")
+        if isinstance(runtime_action_block, dict):
+            if runtime_plan_contract:
                 runtime_action_block["source"] = "Action_Decision_JSON"
                 runtime_action_block["action_runtime_plan_contract"] = runtime_plan_contract
                 runtime_action_block["planned_action"] = runtime_plan_contract.get("planned_action")
                 runtime_action_block["target_sequence_from_action_decision"] = runtime_plan_contract.get("target_sequence")
                 runtime_action_block["target_sequences_from_action_decision"] = runtime_plan_contract.get("target_sequences")
+            lineage_audit = _build_action_runtime_lineage_audit(state)
+            runtime_action_block["action_runtime_lineage_audit"] = lineage_audit
+            state["action_runtime_lineage_audit"] = lineage_audit
     except Exception as exc:
-        add_warning(state, block="action_runtime_plan_contract", message=f"Failed to attach runtime plan audit: {exc}")
+        add_warning(state, block="action_runtime_lineage_audit", message=f"Failed to attach runtime lineage audit: {exc}")
 
     dark_path = save_dark_table_frame_json(
         state=state,
@@ -2390,6 +2395,137 @@ def _build_runtime_action_block(
         "status": status,
         "service": service_block,
         "action_button": action_block,
+    }
+
+
+def _lineage_optional_text(value: object) -> Optional[str]:
+    text = str(value).strip() if value is not None else ""
+    return text or None
+
+
+def _lineage_runtime_plan_contract_from_state(state: Dict[str, object]) -> Dict[str, object]:
+    contract = state.get("clear_json_contract") if isinstance(state.get("clear_json_contract"), dict) else {}
+    action_decision_contract = (
+        contract.get("action_decision_contract")
+        if isinstance(contract.get("action_decision_contract"), dict)
+        else {}
+    )
+    runtime_plan_contract = (
+        action_decision_contract.get("action_runtime_plan_contract")
+        if isinstance(action_decision_contract.get("action_runtime_plan_contract"), dict)
+        else {}
+    )
+    return runtime_plan_contract if isinstance(runtime_plan_contract, dict) else {}
+
+
+def _build_action_runtime_lineage_audit(state: Dict[str, object]) -> Dict[str, object]:
+    """Build V0.7.1 diagnostic lineage between RuntimePlan, runtime action, and click_result.
+
+    Diagnostic-only: this function does not authorize clicks, does not block
+    publication, and does not alter solver/runtime behavior.
+    """
+    runtime_action = state.get("runtime_action") if isinstance(state.get("runtime_action"), dict) else {}
+    action_button = (
+        runtime_action.get("action_button")
+        if isinstance(runtime_action.get("action_button"), dict)
+        else {}
+    )
+    service = (
+        runtime_action.get("service")
+        if isinstance(runtime_action.get("service"), dict)
+        else {}
+    )
+    runtime_plan_contract = _lineage_runtime_plan_contract_from_state(state)
+    transaction_runtime = (
+        state.get("action_transaction_runtime")
+        if isinstance(state.get("action_transaction_runtime"), dict)
+        else {}
+    )
+    click_result = (
+        transaction_runtime.get("click_result")
+        if isinstance(transaction_runtime.get("click_result"), dict)
+        else {}
+    )
+
+    runtime_plan_decision_id = _lineage_optional_text(runtime_plan_contract.get("decision_id"))
+    action_button_decision_id = _lineage_optional_text(action_button.get("decision_id"))
+    service_decision_id = _lineage_optional_text(service.get("decision_id"))
+    click_result_decision_id = _lineage_optional_text(click_result.get("decision_id"))
+
+    observed_runtime_decision_ids = [
+        value
+        for value in (
+            action_button_decision_id,
+            service_decision_id,
+            click_result_decision_id,
+        )
+        if value
+    ]
+    observed_unique_ids = sorted(set(observed_runtime_decision_ids))
+    decision_id_consistent = len(observed_unique_ids) <= 1
+    runtime_plan_has_decision_id = runtime_plan_decision_id is not None
+    decision_id_present = bool(observed_runtime_decision_ids or runtime_plan_decision_id)
+
+    if not decision_id_present:
+        status = "missing_decision_id"
+    elif not decision_id_consistent:
+        status = "decision_id_mismatch"
+    elif not runtime_plan_has_decision_id and observed_runtime_decision_ids:
+        status = "runtime_plan_has_no_decision_id_but_runtime_has_one"
+    else:
+        status = "ok"
+
+    return {
+        "schema_version": "action_runtime_lineage_audit_v0_7_1",
+        "behavior": "diagnostics_only_no_runtime_or_click_behavior_changes",
+        "status": status,
+        "runtime_plan": {
+            "source": runtime_plan_contract.get("source"),
+            "path": runtime_plan_contract.get("path"),
+            "status": runtime_plan_contract.get("status"),
+            "planned_action": runtime_plan_contract.get("planned_action"),
+            "target_sequence": runtime_plan_contract.get("target_sequence"),
+            "target_sequences": runtime_plan_contract.get("target_sequences"),
+            "dry_run": runtime_plan_contract.get("dry_run"),
+            "real_click_enabled": runtime_plan_contract.get("real_click_enabled"),
+            "decision_id": runtime_plan_decision_id,
+            "has_decision_id": runtime_plan_has_decision_id,
+        },
+        "runtime_action": {
+            "status": runtime_action.get("status") if isinstance(runtime_action, dict) else None,
+            "action_button_status": action_button.get("status"),
+            "service_status": service.get("status"),
+            "solver_payload_path": action_button.get("solver_payload_path"),
+            "action_button_decision_id": action_button_decision_id,
+            "service_decision_id": service_decision_id,
+            "solver_action": action_button.get("solver_action"),
+            "target_sequence": action_button.get("target_sequence"),
+            "dry_run": action_button.get("dry_run"),
+            "real_click_enabled": action_button.get("real_click_enabled"),
+        },
+        "click_result": {
+            "status": click_result.get("status"),
+            "branch": click_result.get("branch"),
+            "decision_id": click_result_decision_id,
+            "action": click_result.get("action"),
+            "dry_run": click_result.get("dry_run"),
+            "real_click_enabled": click_result.get("real_click_enabled"),
+            "guard_passed": click_result.get("guard_passed"),
+        },
+        "transaction": {
+            "status": transaction_runtime.get("status"),
+            "reason": transaction_runtime.get("reason"),
+            "phase": transaction_runtime.get("phase"),
+            "click_completed": bool(transaction_runtime.get("click_completed", False)),
+        },
+        "decision_id_present": decision_id_present,
+        "decision_id_consistent": decision_id_consistent,
+        "observed_runtime_decision_ids": observed_unique_ids,
+        "lineage_gap": (
+            "action_runtime_plan_contract_does_not_carry_decision_id"
+            if not runtime_plan_has_decision_id and observed_runtime_decision_ids
+            else None
+        ),
     }
 
 
