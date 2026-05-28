@@ -1609,7 +1609,11 @@ def save_dark_and_clear_table_frame_json(
                 "reason": "state_machine_not_provided",
             }
             previous_clear_state: Optional[Dict[str, Any]] = None
+            previous_table_clear_state: Optional[Dict[str, Any]] = None
             if clear_json_state_machine is not None:
+                previous_table_clear_state = clear_json_state_machine.get_last_clear_json(
+                    table_id=table_id,
+                )
                 previous_clear_state = clear_json_state_machine.get_last_clear_json(
                     table_id=table_id,
                     hand_id=hand_id,
@@ -1618,6 +1622,56 @@ def save_dark_and_clear_table_frame_json(
                     current_clear=clear_state_candidate,
                     previous_clear=previous_clear_state,
                 )
+
+            hand_identity_audit = state.get("hand_identity_recovery_order_audit")
+            if isinstance(hand_identity_audit, dict):
+                previous_same_hand_hero_position, previous_same_hand_hero_cards = _extract_clear_hero_position_and_cards(previous_clear_state)
+                previous_table_hero_position, previous_table_hero_cards = _extract_clear_hero_position_and_cards(previous_table_clear_state)
+                recovered_hero_position, recovered_hero_cards = _extract_clear_hero_position_and_cards(clear_state_candidate)
+                raw_cards = hand_identity_audit.get("raw_hero_cards_for_identity")
+                raw_cards_list = list(raw_cards) if isinstance(raw_cards, list) else []
+                raw_valid = (len(raw_cards_list) == 2 and len(set(raw_cards_list)) == 2)
+                previous_table_hand_id = (
+                    previous_table_clear_state.get("hand_id")
+                    if isinstance(previous_table_clear_state, dict)
+                    else None
+                )
+                previous_same_hand_found = isinstance(previous_clear_state, dict)
+                previous_table_found = isinstance(previous_table_clear_state, dict)
+                recovered_cards_list = list(recovered_hero_cards)
+                hand_identity_audit.update({
+                    "recovery_stage": {
+                        "clear_json_candidate_built": isinstance(clear_state_candidate, dict),
+                        "clear_json_state_machine_available": clear_json_state_machine is not None,
+                        "previous_same_hand_clear_json_found": previous_same_hand_found,
+                        "previous_table_clear_json_found": previous_table_found,
+                        "previous_table_hand_id": previous_table_hand_id,
+                        "previous_same_hand_hero_position": previous_same_hand_hero_position,
+                        "previous_same_hand_hero_cards": list(previous_same_hand_hero_cards),
+                        "previous_table_hero_position": previous_table_hero_position,
+                        "previous_table_hero_cards": list(previous_table_hero_cards),
+                        "recovery_report": recovery_report,
+                        "recovered_hero_position": recovered_hero_position,
+                        "recovered_hero_cards": recovered_cards_list,
+                        "recovery_changed_hero_cards": bool(recovered_cards_list and recovered_cards_list != raw_cards_list),
+                    },
+                    "potential_false_new_hand_id_due_to_pre_recovery_identity": bool(
+                        active_confirmed
+                        and not raw_valid
+                        and previous_table_found
+                        and not previous_same_hand_found
+                    ),
+                    "diagnostic_reason": (
+                        "raw_hero_invalid_but_previous_table_clear_exists_for_different_hand_id"
+                        if (
+                            active_confirmed
+                            and not raw_valid
+                            and previous_table_found
+                            and not previous_same_hand_found
+                        )
+                        else "no_pre_recovery_identity_risk_detected"
+                    ),
+                })
 
             pending_validation = validate_clear_json_contract(clear_state_candidate)
             decision_json_path: Optional[Path] = None
@@ -2887,6 +2941,32 @@ def run_ui_display_analysis_cycle(
             players_block=final_players_block,
             table_status=table_status,
         )
+
+        raw_hero_cards_for_identity = normalize_card_list(hero_cards_for_identity)
+        state["hand_identity_recovery_order_audit"] = {
+            "schema_version": "hand_identity_recovery_order_audit_v0_4_1",
+            "behavior": "diagnostics_only_no_identity_or_recovery_changes",
+            "active_confirmed": bool(active_confirmed),
+            "raw_hero_cards_for_identity": raw_hero_cards_for_identity,
+            "raw_hero_cards_valid_for_identity": (
+                len(raw_hero_cards_for_identity) == 2
+                and len(set(raw_hero_cards_for_identity)) == 2
+            ),
+            "identity_before_recovery": {
+                "hand_id": identity.hand_id,
+                "frame_name": identity.frame_name,
+                "is_continuation": bool(identity.is_continuation),
+                "hero_cards_key": list(identity.hero_cards_key) if identity.hero_cards_key else None,
+                "street": identity.street,
+                "street_occurrence": identity.street_occurrence,
+                "warning": identity.warning,
+            },
+            "risk_note": (
+                "Hand identity is resolved before Clear_JSON recovery in this version. "
+                "This audit proves whether a temporary HERO-card miss can allocate a new hand_id "
+                "while a previous stable Clear_JSON exists for the same table."
+            ),
+        }
 
         state["live_capture_mode"] = _build_live_capture_mode_block()
         _update_runtime_lifecycle_diagnostics(
